@@ -21,6 +21,7 @@ window.fakeStorage = {
 function LocalStorageManager() {
   this.bestScoreKey     = "bestScore";
   this.gameStateKey     = "gameState";
+  this.bestInfiniteKey  = "bestInfinite";
 
   var supported = this.localStorageSupported();
   this.storage = supported ? window.localStorage : window.fakeStorage;
@@ -46,6 +47,15 @@ LocalStorageManager.prototype.getBestScore = function () {
 
 LocalStorageManager.prototype.setBestScore = function (score) {
   this.storage.setItem(this.bestScoreKey, score);
+};
+
+// Has any game reached the singularity (an infinite score)?
+LocalStorageManager.prototype.getBestInfinite = function () {
+  return this.storage.getItem(this.bestInfiniteKey) === "1";
+};
+
+LocalStorageManager.prototype.setBestInfinite = function (reached) {
+  this.storage.setItem(this.bestInfiniteKey, reached ? "1" : "0");
 };
 
 // Game state getters/setters and clearing
