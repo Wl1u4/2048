@@ -5,10 +5,12 @@ function GameManager(size, InputManager, Actuator, StorageManager) {
   this.actuator       = new Actuator;
 
   this.startTiles     = 2;
+  this.blackHoleValue = 2048; // Two Suns (1024) collapse into a black hole
 
   this.inputManager.on("move", this.move.bind(this));
   this.inputManager.on("restart", this.restart.bind(this));
   this.inputManager.on("keepPlaying", this.keepPlaying.bind(this));
+  this.inputManager.on("demo", this.loadDemo.bind(this));
 
   this.setup();
 }
@@ -16,24 +18,25 @@ function GameManager(size, InputManager, Actuator, StorageManager) {
 // Restart the game
 GameManager.prototype.restart = function () {
   this.storageManager.clearGameState();
-  this.actuator.continueGame(); // Clear the game won/lost message
+  this.actuator.continueGame(); // Clear the game over / singularity message
   this.setup();
 };
 
-// Keep playing after winning (allows going over 2048)
+// Dismiss the singularity message and keep collapsing
 GameManager.prototype.keepPlaying = function () {
-  this.keepPlaying = true;
-  this.actuator.continueGame(); // Clear the game won/lost message
+  this.actuator.continueGame();
 };
 
-// Return true if the game is lost, or has won and the user hasn't kept playing
+// Return true if the game is lost, or a black hole is busy swallowing the board
 GameManager.prototype.isGameTerminated = function () {
-  return this.over || (this.won && !this.keepPlaying);
+  return this.over || !!this.collapsing;
 };
 
 // Set up the game
 GameManager.prototype.setup = function () {
   var previousState = this.storageManager.getGameState();
+
+  this.collapsing = false;
 
   // Reload the game from a previous game if present
   if (previousState) {
@@ -41,14 +44,16 @@ GameManager.prototype.setup = function () {
                                 previousState.grid.cells); // Reload grid
     this.score       = previousState.score;
     this.over        = previousState.over;
-    this.won         = previousState.won;
-    this.keepPlaying = previousState.keepPlaying;
+    this.singularity = !!previousState.singularity;
+    this.infinite    = !!previousState.infinite;
+    this.maxValue    = Math.max(previousState.maxValue || 2, this.largestValue());
   } else {
     this.grid        = new Grid(this.size);
     this.score       = 0;
     this.over        = false;
-    this.won         = false;
-    this.keepPlaying = false;
+    this.singularity = false;
+    this.infinite    = false;
+    this.maxValue    = 2;
 
     // Add the initial tiles
     this.addStartTiles();
@@ -56,6 +61,35 @@ GameManager.prototype.setup = function () {
 
   // Update the actuator
   this.actuate();
+
+  // A saved game can hold a black hole that never got to collapse
+  if (!this.singularity) {
+    var hole = this.findBlackHole();
+    if (hole) this.collapse(hole);
+  }
+};
+
+// Start a new game one swipe away from a black hole: two Suns side by side
+GameManager.prototype.loadDemo = function () {
+  var self = this;
+
+  this.storageManager.clearGameState();
+  this.actuator.continueGame();
+
+  this.collapsing  = false;
+  this.score       = 0;
+  this.over        = false;
+  this.singularity = false;
+  this.infinite    = false;
+  this.grid        = new Grid(this.size);
+
+  [[0, 0, 512], [1, 0, 1024], [2, 0, 1024], [0, 1, 256],
+   [1, 1, 32], [3, 2, 8], [2, 3, 64], [0, 3, 2]].forEach(function (t) {
+    self.grid.insertTile(new Tile({ x: t[0], y: t[1] }, t[2]));
+  });
+  this.maxValue = 1024;
+
+  this.actuate({ demo: true });
 };
 
 // Set up the initial tiles to start the game with
@@ -72,30 +106,44 @@ GameManager.prototype.addRandomTile = function () {
     var tile = new Tile(this.grid.randomAvailableCell(), value);
 
     this.grid.insertTile(tile);
+    this.maxValue = Math.max(this.maxValue || 2, value);
   }
 };
 
 // Sends the updated grid to the actuator
-GameManager.prototype.actuate = function () {
+GameManager.prototype.actuate = function (extra) {
   if (this.storageManager.getBestScore() < this.score) {
     this.storageManager.setBestScore(this.score);
   }
 
-  // Clear the state when the game is over (game over only, not win)
+  // Clear the state when the game is over
   if (this.over) {
     this.storageManager.clearGameState();
   } else {
     this.storageManager.setGameState(this.serialize());
   }
 
-  this.actuator.actuate(this.grid, {
-    score:      this.score,
-    over:       this.over,
-    won:        this.won,
-    bestScore:  this.storageManager.getBestScore(),
-    terminated: this.isGameTerminated()
-  });
+  var metadata = {
+    score:        this.score,
+    over:         this.over,
+    bestScore:    this.storageManager.getBestScore(),
+    bestInfinite: this.bestInfinite(),
+    terminated:   this.isGameTerminated(),
+    singularity:  this.singularity,
+    infinite:     this.infinite,
+    maxValue:     this.maxValue
+  };
+  if (extra) {
+    for (var key in extra) metadata[key] = extra[key];
+  }
 
+  this.actuator.actuate(this.grid, metadata);
+};
+
+// Has any game ever reached the singularity? (Storage without this method just says no)
+GameManager.prototype.bestInfinite = function () {
+  return typeof this.storageManager.getBestInfinite === "function" &&
+         !!this.storageManager.getBestInfinite();
 };
 
 // Represent the current game as an object
@@ -104,8 +152,9 @@ GameManager.prototype.serialize = function () {
     grid:        this.grid.serialize(),
     score:       this.score,
     over:        this.over,
-    won:         this.won,
-    keepPlaying: this.keepPlaying
+    singularity: this.singularity,
+    infinite:    this.infinite,
+    maxValue:    this.maxValue
   };
 };
 
@@ -126,6 +175,18 @@ GameManager.prototype.moveTile = function (tile, cell) {
   tile.updatePosition(cell);
 };
 
+// Can these two tiles merge? Normally only equal values do.
+// Past the event horizon, any two bodies combine.
+GameManager.prototype.canMerge = function (tile, other) {
+  if (this.singularity) return true;
+  return other.value === tile.value && tile.value < this.blackHoleValue;
+};
+
+// In the singularity, a merge climbs one step above the bigger body, up to a black hole
+GameManager.prototype.singularityValue = function (tile, other) {
+  return Math.min(this.blackHoleValue, Math.max(tile.value, other.value) * 2);
+};
+
 // Move tiles on the grid in the specified direction
 GameManager.prototype.move = function (direction) {
   // 0: up, 1: right, 2: down, 3: left
@@ -138,6 +199,8 @@ GameManager.prototype.move = function (direction) {
   var vector     = this.getVector(direction);
   var traversals = this.buildTraversals(vector);
   var moved      = false;
+  var merges     = [];
+  var blackHole  = null;
 
   // Save the current tile positions and remove merger information
   this.prepareTiles();
@@ -153,8 +216,9 @@ GameManager.prototype.move = function (direction) {
         var next      = self.grid.cellContent(positions.next);
 
         // Only one merger per row traversal?
-        if (next && next.value === tile.value && !next.mergedFrom) {
+        if (next && !next.mergedFrom && self.canMerge(tile, next)) {
           var merged = new Tile(positions.next, tile.value * 2);
+          if (self.singularity) merged.value = self.singularityValue(tile, next);
           merged.mergedFrom = [tile, next];
 
           self.grid.insertTile(merged);
@@ -166,8 +230,13 @@ GameManager.prototype.move = function (direction) {
           // Update the score
           self.score += merged.value;
 
-          // The mighty 2048 tile
-          if (merged.value === 2048) self.won = true;
+          merges.push(merged);
+          self.maxValue = Math.max(self.maxValue || 2, merged.value);
+
+          // Two Suns make a black hole, which swallows the whole system
+          if (merged.value === self.blackHoleValue && !self.singularity && !blackHole) {
+            blackHole = merged;
+          }
         } else {
           self.moveTile(tile, positions.farthest);
         }
@@ -182,12 +251,69 @@ GameManager.prototype.move = function (direction) {
   if (moved) {
     this.addRandomTile();
 
-    if (!this.movesAvailable()) {
+    if (blackHole) {
+      this.collapse(blackHole);
+    } else if (!this.movesAvailable()) {
       this.over = true; // Game over!
     }
 
-    this.actuate();
+    this.actuate({ merges: merges, moved: true });
   }
+};
+
+// Find a black hole on the board, if there is one
+GameManager.prototype.findBlackHole = function () {
+  var self = this, hole = null;
+  this.grid.eachCell(function (x, y, tile) {
+    if (tile && !hole && tile.value >= self.blackHoleValue) hole = tile;
+  });
+  return hole;
+};
+
+// The biggest value on the board
+GameManager.prototype.largestValue = function () {
+  var largest = 2;
+  this.grid.eachCell(function (x, y, tile) {
+    if (tile && tile.value > largest) largest = tile.value;
+  });
+  return largest;
+};
+
+// A black hole formed: lock input while the actuator animates the collapse
+GameManager.prototype.collapse = function (blackHole) {
+  var self  = this;
+  var token = {};
+
+  this.collapsing = token;
+  this.maxValue   = Math.max(this.maxValue || 2, this.blackHoleValue);
+
+  var hole = { x: blackHole.x, y: blackHole.y };
+  if (typeof this.actuator.collapse === "function") {
+    this.actuator.collapse(hole, this.score, function () {
+      if (self.collapsing === token) self.finishCollapse(hole);
+    });
+  } else {
+    this.finishCollapse(hole);
+  }
+};
+
+// Everything else is gone. From now on every merge counts, and the score is infinite.
+GameManager.prototype.finishCollapse = function (hole) {
+  this.collapsing  = false;
+  this.singularity = true;
+  this.infinite    = true;
+  this.grid        = new Grid(this.size);
+
+  var blackHole = new Tile(hole, this.blackHoleValue);
+  blackHole.settled = true; // Already on screen, so skip the "new tile" pop
+  this.grid.insertTile(blackHole);
+  this.addStartTiles();
+
+  if (typeof this.storageManager.setBestInfinite === "function") {
+    this.storageManager.setBestInfinite(true);
+  }
+
+  this.actuate({ singularityStart: true });
 };
 
 // Get the vector representing the chosen direction
@@ -256,7 +382,7 @@ GameManager.prototype.tileMatchesAvailable = function () {
 
           var other  = self.grid.cellContent(cell);
 
-          if (other && other.value === tile.value) {
+          if (other && self.canMerge(tile, other)) {
             return true; // These two tiles can be merged
           }
         }
