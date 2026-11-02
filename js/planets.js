@@ -358,19 +358,15 @@ window.Planets = (function () {
   // Paints every body once and stores an image URL on each. Resolves when done.
   function paint() {
     var specs = bodySpecs();
-    var jobs = [];
     for (var l = 1; l <= BH; l++) {
       (function (b, l) {
         var S = clamp(Math.ceil(b.img * 264 / 32) * 32, 96, 256);
         var cv = l === BH ? paintBlackHole(256) : renderSphere(specs[l], S);
-        jobs.push(new Promise(function (resolve) {
-          try {
-            cv.toBlob(function (blob) { b.url = blob ? URL.createObjectURL(blob) : cv.toDataURL(); resolve(); }, "image/png");
-          } catch (e) { b.url = cv.toDataURL(); resolve(); }
-        }));
+        // A data URL works everywhere, including Safari opening index.html straight from disk
+        b.url = cv.toDataURL("image/png");
       })(BODIES[l], l);
     }
-    return Promise.all(jobs);
+    return Promise.resolve();
   }
 
   return { BODIES: BODIES, BH: BH, paint: paint, levelFor: levelFor, bodyFor: bodyFor, nameFor: nameFor, isAnomaly: isAnomaly, rgba: rgba };
