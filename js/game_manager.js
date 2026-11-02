@@ -217,7 +217,7 @@ GameManager.prototype.move = function (direction) {
 
         // Only one merger per row traversal?
         if (next && !next.mergedFrom && self.canMerge(tile, next)) {
-          var merged = new Tile(positions.next, tile.value * 2);
+          var merged = new Tile(positions.next, tile.value * 3);
           if (self.singularity) merged.value = self.singularityValue(tile, next);
           merged.mergedFrom = [tile, next];
 
